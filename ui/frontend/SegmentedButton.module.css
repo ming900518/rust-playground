@@ -1,4 +1,4 @@
-$bg-light: #fff;
+$bg-light: #f8e8ec;
 $bg-dark: #f9f9f9;
 
 .container {
@@ -13,7 +13,6 @@ $bg-dark: #f9f9f9;
 .button {
   composes: -buttonReset from './shared.module.css';
   border: 1px solid var(--header-main-border);
-  background: linear-gradient($bg-light, $bg-dark);
   background-color: $bg-light;
   color: #444;
 
@@ -50,8 +49,8 @@ $bg-dark: #f9f9f9;
 
 .buttonBuild {
   composes: button;
-  border-color: hsl(15deg 66.7% 32%);
-  background: var(--rust);
+  border-color: rgb(189, 111, 111);
+  background: rgb(189, 111, 111);
   color: white;
 
   &:not(:last-child) {

@@ -38,8 +38,8 @@ export interface State {
 const DEFAULT: State = {
   editor: Editor.Ace,
   ace: {
-    keybinding: 'ace',
-    theme: 'github',
+    keybinding: 'vim',
+    theme: 'xcode',
     pairCharacters: PairCharacters.Enabled,
   },
   monaco: {

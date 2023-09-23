@@ -1,5 +1,5 @@
 :root {
-  --primary-font: 'Open Sans', sans-serif;
+  --primary-font: -apple-system, 'SF Pro Display', Helvetica, sans-serif, 'Open Sans', sans-serif;
   --rust: #a42;
   --rust-dark: #80331a;
   --border-color: #bbb;
@@ -32,7 +32,7 @@ html {
 }
 
 body {
-  background-color: #e1e1db;
+  background-color: #fcd3db;
   padding: 0 1em;
   font-family: var(--primary-font);
 }
