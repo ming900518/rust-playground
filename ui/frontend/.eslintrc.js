@@ -63,7 +63,10 @@ module.exports = {
       files: [
         '.eslintrc.js',
         'BuildMenu.tsx',
+        'ButtonSet.tsx',
+        'Header.tsx',
         'PopButton.tsx',
+        'Stdin.tsx',
         'compileActions.ts',
         'editor/AceEditor.tsx',
         'editor/SimpleEditor.tsx',
@@ -76,6 +79,7 @@ module.exports = {
         'reducers/output/gist.ts',
         'reducers/output/hir.ts',
         'reducers/output/llvmIr.ts',
+        'reducers/output/meta.ts',
         'reducers/output/mir.ts',
         'reducers/output/wasm.ts',
         'reducers/websocket.ts',

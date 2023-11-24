@@ -1,3 +1,5 @@
+pnpm-lock.yaml
+
 build
 node_modules
 
@@ -12,7 +14,10 @@ node_modules
 # Slowly migrate files that we've touched
 !.eslintrc.js
 !BuildMenu.tsx
+!ButtonSet.tsx
+!Header.tsx
 !PopButton.tsx
+!Stdin.tsx
 !compileActions.ts
 !editor/AceEditor.tsx
 !editor/SimpleEditor.tsx
@@ -25,6 +30,7 @@ node_modules
 !reducers/output/gist.ts
 !reducers/output/hir.ts
 !reducers/output/llvmIr.ts
+!reducers/output/meta.ts
 !reducers/output/mir.ts
 !reducers/output/wasm.ts
 !reducers/websocket.ts

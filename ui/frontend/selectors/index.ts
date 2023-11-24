@@ -6,6 +6,7 @@ import {
   Backtrace,
   Channel,
   Edition,
+  Focus,
   Orientation,
   PrimaryActionAuto,
   PrimaryActionCore,
@@ -321,6 +322,15 @@ export const isOutputFocused = createSelector(
   (focus) => !!focus,
 );
 
+export const showStdinSelector = createSelector(
+  focus,
+  (focus) => focus == Focus.Execute,
+)
+export const enableStdinSelector = createSelector(
+  (state: State) => state.output.execute.requestsInProgress,
+  (req) => req > 0,
+)
+
 const orientationConfig = (state: State) => state.configuration.orientation;
 const browserWidthIsSmall = (state: State) => state.browser.isSmall;
 
@@ -353,13 +363,13 @@ const websocket = (state: State) => state.websocket;
 const clientFeatureFlagThreshold = createSelector(client, (c) => c.featureFlagThreshold);
 
 const showGemThreshold = createSelector(featureFlags, ff => ff.showGemThreshold);
-const executeViaWebsocketThreshold = createSelector(featureFlags, ff => ff.executeViaWebsocketThreshold);
 
 const createFeatureFlagSelector = (ff: (state: State) => number) =>
   createSelector(clientFeatureFlagThreshold, ff, (c, ff) => c <= ff);
 
 export const showGemSelector = createFeatureFlagSelector(showGemThreshold);
-export const executeViaWebsocketSelector = createFeatureFlagSelector(executeViaWebsocketThreshold);
+
+export const executeViaWebsocketSelector = createSelector(websocket, (ws) => ws.connected);
 
 export type WebSocketStatus =
   { state: 'disconnected' } |

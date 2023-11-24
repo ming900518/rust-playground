@@ -16,7 +16,6 @@ import {
   DemangleAssembly,
   Edition,
   Editor,
-  Focus,
   Mode,
   Notification,
   Orientation,
@@ -86,7 +85,6 @@ export enum ActionType {
   ChangeMode = 'CHANGE_MODE',
   ChangeEdition = 'CHANGE_EDITION',
   ChangeBacktrace = 'CHANGE_BACKTRACE',
-  ChangeFocus = 'CHANGE_FOCUS',
   EditCode = 'EDIT_CODE',
   AddMainFunction = 'ADD_MAIN_FUNCTION',
   AddImport = 'ADD_IMPORT',
@@ -155,8 +153,16 @@ export const changeChannel = (channel: Channel) =>
 export const changeMode = (mode: Mode) =>
   createAction(ActionType.ChangeMode, { mode });
 
-export const changeEdition = (edition: Edition) =>
+const changeEditionRaw = (edition: Edition) =>
   createAction(ActionType.ChangeEdition, { edition });
+
+export const changeEdition = (edition: Edition): ThunkAction => dispatch => {
+  if (edition === Edition.Rust2024) {
+    dispatch(changeChannel(Channel.Nightly));
+  }
+
+  dispatch(changeEditionRaw(edition));
+}
 
 export const changeBacktrace = (backtrace: Backtrace) =>
   createAction(ActionType.ChangeBacktrace, { backtrace });
@@ -165,9 +171,6 @@ export const reExecuteWithBacktrace = (): ThunkAction => dispatch => {
   dispatch(changeBacktrace(Backtrace.Enabled));
   dispatch(performExecuteOnly());
 };
-
-export const changeFocus = (focus?: Focus) =>
-  createAction(ActionType.ChangeFocus, { focus });
 
 type FetchArg = Parameters<typeof fetch>[0];
 
@@ -263,7 +266,11 @@ function performAutoOnly(): ThunkAction {
 
 const performExecuteOnly = (): ThunkAction => performCommonExecute('bin', false);
 const performCompileOnly = (): ThunkAction => performCommonExecute('lib', false);
-const performTestOnly = (): ThunkAction => performCommonExecute('lib', true);
+const performTestOnly = (): ThunkAction => (dispatch, getState) => {
+  const state = getState();
+  const crateType = getCrateType(state);
+  return dispatch(performCommonExecute(crateType, true));
+};
 
 interface GenericApiFailure {
   error: string;
@@ -557,6 +564,8 @@ function parseEdition(s?: string): Edition | null {
       return Edition.Rust2018;
     case '2021':
       return Edition.Rust2021;
+    case '2024':
+      return Edition.Rust2024;
     default:
       return null;
   }
@@ -595,7 +604,7 @@ export function indexPageLoad({
 
     dispatch(changeChannel(channel));
     dispatch(changeMode(mode));
-    dispatch(changeEdition(edition));
+    dispatch(changeEditionRaw(edition));
   };
 }
 
@@ -618,9 +627,8 @@ export type Action =
   | ReturnType<typeof changeBacktrace>
   | ReturnType<typeof changeChannel>
   | ReturnType<typeof changeDemangleAssembly>
-  | ReturnType<typeof changeEdition>
+  | ReturnType<typeof changeEditionRaw>
   | ReturnType<typeof changeEditor>
-  | ReturnType<typeof changeFocus>
   | ReturnType<typeof changeKeybinding>
   | ReturnType<typeof changeMode>
   | ReturnType<typeof changeOrientation>

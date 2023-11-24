@@ -26,6 +26,8 @@ pub enum CoordinatorMessage {
     ReadFile(ReadFileRequest),
     ExecuteCommand(ExecuteCommandRequest),
     StdinPacket(String),
+    StdinClose,
+    Kill,
 }
 
 impl_narrow_to_broad!(
@@ -117,6 +119,7 @@ pub struct ExecuteCommandRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExecuteCommandResponse {
     pub success: bool,
+    pub exit_detail: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

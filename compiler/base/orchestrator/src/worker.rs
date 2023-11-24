@@ -36,7 +36,7 @@ use std::{
     collections::HashMap,
     io,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
 };
 use tokio::{
     fs,
@@ -46,6 +46,7 @@ use tokio::{
     sync::mpsc,
     task::JoinSet,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     bincode_input_closed,
@@ -57,8 +58,6 @@ use crate::{
     DropErrorDetailsExt,
 };
 
-type CommandRequest = (Multiplexed<ExecuteCommandRequest>, MultiplexingSender);
-
 pub async fn listen(project_dir: impl Into<PathBuf>) -> Result<(), Error> {
     let project_dir = project_dir.into();
 
@@ -66,16 +65,14 @@ pub async fn listen(project_dir: impl Into<PathBuf>) -> Result<(), Error> {
     let (worker_msg_tx, worker_msg_rx) = mpsc::channel(8);
     let mut io_tasks = spawn_io_queue(coordinator_msg_tx, worker_msg_rx);
 
-    let (cmd_tx, cmd_rx) = mpsc::channel(8);
-    let (stdin_tx, stdin_rx) = mpsc::channel(8);
-    let process_task = tokio::spawn(manage_processes(stdin_rx, cmd_rx, project_dir.clone()));
+    let (process_tx, process_rx) = mpsc::channel(8);
+    let process_task = tokio::spawn(manage_processes(process_rx, project_dir.clone()));
 
     let handler_task = tokio::spawn(handle_coordinator_message(
         coordinator_msg_rx,
         worker_msg_tx,
         project_dir,
-        cmd_tx,
-        stdin_tx,
+        process_tx,
     ));
 
     select! {
@@ -122,8 +119,7 @@ async fn handle_coordinator_message(
     mut coordinator_msg_rx: mpsc::Receiver<Multiplexed<CoordinatorMessage>>,
     worker_msg_tx: mpsc::Sender<Multiplexed<WorkerMessage>>,
     project_dir: PathBuf,
-    cmd_tx: mpsc::Sender<CommandRequest>,
-    stdin_tx: mpsc::Sender<Multiplexed<String>>,
+    process_tx: mpsc::Sender<Multiplexed<ProcessCommand>>,
 ) -> Result<(), HandleCoordinatorMessageError> {
     use handle_coordinator_message_error::*;
 
@@ -177,19 +173,35 @@ async fn handle_coordinator_message(
                     }
 
                     CoordinatorMessage::ExecuteCommand(req) => {
-                        cmd_tx
-                            .send((Multiplexed(job_id, req), worker_msg_tx()))
+                        process_tx
+                            .send(Multiplexed(job_id, ProcessCommand::Start(req, worker_msg_tx())))
                             .await
                             .drop_error_details()
                             .context(UnableToSendCommandExecutionRequestSnafu)?;
                     }
 
                     CoordinatorMessage::StdinPacket(data) => {
-                        stdin_tx
-                            .send(Multiplexed(job_id, data))
+                        process_tx
+                            .send(Multiplexed(job_id, ProcessCommand::Stdin(data)))
                             .await
                             .drop_error_details()
                             .context(UnableToSendStdinPacketSnafu)?;
+                    }
+
+                    CoordinatorMessage::StdinClose => {
+                        process_tx
+                            .send(Multiplexed(job_id, ProcessCommand::StdinClose))
+                            .await
+                            .drop_error_details()
+                            .context(UnableToSendStdinCloseSnafu)?;
+                    }
+
+                    CoordinatorMessage::Kill => {
+                        process_tx
+                        .send(Multiplexed(job_id, ProcessCommand::Kill))
+                        .await
+                        .drop_error_details()
+                        .context(UnableToSendKillSnafu)?;
                     }
                 }
             }
@@ -220,6 +232,12 @@ pub enum HandleCoordinatorMessageError {
 
     #[snafu(display("Failed to send stdin packet to the command task"))]
     UnableToSendStdinPacket { source: mpsc::error::SendError<()> },
+
+    #[snafu(display("Failed to send stdin close request to the command task"))]
+    UnableToSendStdinClose { source: mpsc::error::SendError<()> },
+
+    #[snafu(display("Failed to send kill request to the command task"))]
+    UnableToSendKill { source: mpsc::error::SendError<()> },
 
     #[snafu(display("A coordinator command handler background task panicked"))]
     TaskPanicked { source: tokio::task::JoinError },
@@ -373,63 +391,144 @@ fn parse_working_dir(cwd: Option<String>, project_path: impl Into<PathBuf>) -> P
     final_path
 }
 
+enum ProcessCommand {
+    Start(ExecuteCommandRequest, MultiplexingSender),
+    Stdin(String),
+    StdinClose,
+    Kill,
+}
+
+struct ProcessState {
+    project_path: PathBuf,
+    processes: JoinSet<Result<(), ProcessError>>,
+    stdin_senders: HashMap<JobId, mpsc::Sender<String>>,
+    stdin_shutdown_tx: mpsc::Sender<JobId>,
+    kill_tokens: HashMap<JobId, CancellationToken>,
+}
+
+impl ProcessState {
+    fn new(project_path: PathBuf, stdin_shutdown_tx: mpsc::Sender<JobId>) -> Self {
+        Self {
+            project_path,
+            processes: Default::default(),
+            stdin_senders: Default::default(),
+            stdin_shutdown_tx,
+            kill_tokens: Default::default(),
+        }
+    }
+
+    async fn start(
+        &mut self,
+        job_id: JobId,
+        req: ExecuteCommandRequest,
+        worker_msg_tx: MultiplexingSender,
+    ) -> Result<(), ProcessError> {
+        use process_error::*;
+
+        let token = CancellationToken::new();
+
+        let RunningChild {
+            child,
+            stdin_rx,
+            stdin,
+            stdout,
+            stderr,
+        } = match process_begin(req, &self.project_path, &mut self.stdin_senders, job_id) {
+            Ok(v) => v,
+            Err(e) => {
+                // Should we add a message for process started
+                // in addition to the current message which
+                // indicates that the process has ended?
+                worker_msg_tx
+                    .send_err(e)
+                    .await
+                    .context(UnableToSendExecuteCommandStartedResponseSnafu)?;
+                return Ok(());
+            }
+        };
+
+        let task_set = stream_stdio(worker_msg_tx.clone(), stdin_rx, stdin, stdout, stderr);
+
+        self.kill_tokens.insert(job_id, token.clone());
+
+        self.processes.spawn({
+            let stdin_shutdown_tx = self.stdin_shutdown_tx.clone();
+            async move {
+                worker_msg_tx
+                    .send(process_end(token, child, task_set, stdin_shutdown_tx, job_id).await)
+                    .await
+                    .context(UnableToSendExecuteCommandResponseSnafu)
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn stdin(&mut self, job_id: JobId, packet: String) -> Result<(), ProcessError> {
+        use process_error::*;
+
+        if let Some(stdin_tx) = self.stdin_senders.get(&job_id) {
+            stdin_tx
+                .send(packet)
+                .await
+                .drop_error_details()
+                .context(UnableToSendStdinDataSnafu)?;
+        }
+
+        Ok(())
+    }
+
+    fn stdin_close(&mut self, job_id: JobId) {
+        self.stdin_senders.remove(&job_id);
+        // Should we care if we remove a sender that's already removed?
+    }
+
+    async fn join_process(&mut self) -> Option<Result<(), ProcessError>> {
+        use process_error::*;
+
+        let process = self.processes.join_next().await?;
+        Some(process.context(ProcessTaskPanickedSnafu).and_then(|e| e))
+    }
+
+    fn kill(&mut self, job_id: JobId) {
+        if let Some(token) = self.kill_tokens.get(&job_id) {
+            token.cancel();
+        }
+    }
+}
+
 async fn manage_processes(
-    mut stdin_rx: mpsc::Receiver<Multiplexed<String>>,
-    mut cmd_rx: mpsc::Receiver<CommandRequest>,
+    mut rx: mpsc::Receiver<Multiplexed<ProcessCommand>>,
     project_path: PathBuf,
 ) -> Result<(), ProcessError> {
     use process_error::*;
 
-    let mut processes = JoinSet::new();
-    let mut stdin_senders = HashMap::new();
     let (stdin_shutdown_tx, mut stdin_shutdown_rx) = mpsc::channel(8);
+    let mut state = ProcessState::new(project_path, stdin_shutdown_tx);
 
     loop {
         select! {
-            cmd_req = cmd_rx.recv() => {
-                let Some((Multiplexed(job_id, req), worker_msg_tx)) = cmd_req else { break };
+            cmd = rx.recv() => {
+                let Some(Multiplexed(job_id, cmd)) = cmd else { break };
 
-                let RunningChild { child, stdin_rx, stdin, stdout, stderr } = match process_begin(req, &project_path, &mut stdin_senders, job_id) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        // Should we add a message for process started
-                        // in addition to the current message which
-                        // indicates that the process has ended?
-                        worker_msg_tx.send_err(e).await.context(UnableToSendExecuteCommandStartedResponseSnafu)?;
-                        continue;
-                    }
-                };
+                match cmd {
+                    ProcessCommand::Start(req, worker_msg_tx) => state.start(job_id, req, worker_msg_tx).await?,
 
-                let task_set = stream_stdio(worker_msg_tx.clone(), stdin_rx, stdin, stdout, stderr);
+                    ProcessCommand::Stdin(packet) => state.stdin(job_id, packet).await?,
 
-                processes.spawn({
-                    let stdin_shutdown_tx = stdin_shutdown_tx.clone();
-                    async move {
-                        worker_msg_tx
-                            .send(process_end(child, task_set, stdin_shutdown_tx, job_id).await)
-                            .await
-                            .context(UnableToSendExecuteCommandResponseSnafu)
-                    }
-                });
-            }
+                    ProcessCommand::StdinClose => state.stdin_close(job_id),
 
-            stdin_packet = stdin_rx.recv() => {
-                // Dispatch stdin packet to different child by attached command id.
-                let Some(Multiplexed(job_id, packet)) = stdin_packet else { break };
-
-                if let Some(stdin_tx) = stdin_senders.get(&job_id) {
-                    stdin_tx.send(packet).await.drop_error_details().context(UnableToSendStdinDataSnafu)?;
+                    ProcessCommand::Kill => state.kill(job_id),
                 }
             }
 
             job_id = stdin_shutdown_rx.recv() => {
                 let job_id = job_id.context(StdinShutdownReceiverEndedSnafu)?;
-                stdin_senders.remove(&job_id);
-                // Should we care if we remove a sender that's already removed?
+                state.stdin_close(job_id);
             }
 
-            Some(process) = processes.join_next() => {
-                process.context(ProcessTaskPanickedSnafu)??;
+            Some(process) = state.join_process() => {
+                process?;
             }
         }
     }
@@ -488,12 +587,18 @@ fn process_begin(
 }
 
 async fn process_end(
+    token: CancellationToken,
     mut child: Child,
     mut task_set: JoinSet<Result<(), StdioError>>,
     stdin_shutdown_tx: mpsc::Sender<JobId>,
     job_id: JobId,
 ) -> Result<ExecuteCommandResponse, ProcessError> {
     use process_error::*;
+
+    select! {
+        () = token.cancelled() => child.kill().await.context(KillChildSnafu)?,
+        _ = child.wait() => {},
+    };
 
     let status = child.wait().await.context(WaitChildSnafu)?;
 
@@ -509,7 +614,111 @@ async fn process_end(
     }
 
     let success = status.success();
-    Ok(ExecuteCommandResponse { success })
+    let exit_detail = extract_exit_detail(status);
+
+    Ok(ExecuteCommandResponse {
+        success,
+        exit_detail,
+    })
+}
+
+mod signals {
+    mod descriptions {
+        #![allow(dead_code)]
+
+        pub const SIGABRT: &str = "abort program";
+        pub const SIGALRM: &str = "real-time timer expired";
+        pub const SIGBUS: &str = "bus error";
+        pub const SIGEMT: &str = "emulate instruction executed";
+        pub const SIGFPE: &str = "floating-point exception";
+        pub const SIGHUP: &str = "terminal line hangup";
+        pub const SIGILL: &str = "illegal instruction";
+        pub const SIGINT: &str = "interrupt program";
+        pub const SIGKILL: &str = "kill program";
+        pub const SIGPIPE: &str = "write on a pipe with no reader";
+        pub const SIGQUIT: &str = "quit program";
+        pub const SIGSEGV: &str = "segmentation violation";
+        pub const SIGSYS: &str = "non-existent system call invoked";
+        pub const SIGTERM: &str = "software termination signal";
+        pub const SIGTRAP: &str = "trace trap";
+        pub const SIGUSR1: &str = "user-defined signal 1";
+        pub const SIGUSR2: &str = "user-defined signal 2";
+    }
+
+    type Pair = (&'static str, &'static str);
+
+    macro_rules! sigtable {
+        [$($name:ident,)*] => {
+            [
+                $((stringify!($name), descriptions::$name),)*
+            ]
+        };
+    }
+
+    #[cfg(target_os = "macos")]
+    const SIGNALS: [Pair; 15] = sigtable![
+        SIGHUP,  //  1
+        SIGINT,  //  2
+        SIGQUIT, //  3
+        SIGILL,  //  4
+        SIGTRAP, //  5
+        SIGABRT, //  6
+        SIGEMT,  //  7
+        SIGFPE,  //  8
+        SIGKILL, //  9
+        SIGBUS,  // 10
+        SIGSEGV, // 11
+        SIGSYS,  // 12
+        SIGPIPE, // 13
+        SIGALRM, // 14
+        SIGTERM, // 15
+    ];
+
+    #[cfg(target_os = "linux")]
+    const SIGNALS: [Pair; 15] = sigtable![
+        SIGHUP,  //  1
+        SIGINT,  //  2
+        SIGQUIT, //  3
+        SIGILL,  //  4
+        SIGTRAP, //  5
+        SIGABRT, //  6
+        SIGBUS,  //  7
+        SIGFPE,  //  8
+        SIGKILL, //  9
+        SIGUSR1, // 10
+        SIGSEGV, // 11
+        SIGUSR2, // 12
+        SIGPIPE, // 13
+        SIGALRM, // 14
+        SIGTERM, // 15
+    ];
+
+    const SIG_UNKNOWN: Pair = ("???", "Unknown signal");
+
+    pub fn get(signal: i32) -> Pair {
+        let details = (|| {
+            let signal = usize::try_from(signal).ok()?;
+            let signal = signal.checked_sub(1)?;
+            SIGNALS.get(signal).copied()
+        })();
+
+        details.unwrap_or(SIG_UNKNOWN)
+    }
+}
+
+fn extract_exit_detail(status: ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+
+    if let Some(code) = status.code() {
+        return format!("Exited with status {code}");
+    }
+
+    if let Some(signal) = status.signal() {
+        let (name, description) = signals::get(signal);
+        return format!("Exited with signal {signal} ({name}): {description}");
+    }
+
+    String::new()
 }
 
 #[derive(Debug, Snafu)]
@@ -529,6 +738,9 @@ pub enum ProcessError {
 
     #[snafu(display("Failed to send stdin data"))]
     UnableToSendStdinData { source: mpsc::error::SendError<()> },
+
+    #[snafu(display("Failed to kill the child process"))]
+    KillChild { source: std::io::Error },
 
     #[snafu(display("Failed to wait for child process exiting"))]
     WaitChild { source: std::io::Error },
@@ -567,10 +779,7 @@ fn stream_stdio(
     let mut set = JoinSet::new();
 
     set.spawn(async move {
-        loop {
-            let Some(data) = stdin_rx.recv().await else {
-                break;
-            };
+        while let Some(data) = stdin_rx.recv().await {
             stdin
                 .write_all(data.as_bytes())
                 .await

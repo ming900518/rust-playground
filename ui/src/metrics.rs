@@ -197,80 +197,6 @@ where
     }
 }
 
-impl GenerateLabels for sandbox::CompileRequest {
-    fn generate_labels(&self, outcome: Outcome) -> Labels {
-        let Self {
-            target,
-            channel,
-            crate_type,
-            mode,
-            edition,
-            tests,
-            backtrace,
-            code: _,
-        } = *self;
-
-        Labels {
-            endpoint: Endpoint::Compile,
-            outcome,
-
-            target: Some(target),
-            channel: Some(channel),
-            mode: Some(mode),
-            edition: Some(edition),
-            crate_type: Some(crate_type),
-            tests: Some(tests),
-            backtrace: Some(backtrace),
-        }
-    }
-}
-
-impl GenerateLabels for sandbox::ExecuteRequest {
-    fn generate_labels(&self, outcome: Outcome) -> Labels {
-        let Self {
-            channel,
-            mode,
-            edition,
-            crate_type,
-            tests,
-            backtrace,
-            code: _,
-        } = *self;
-
-        Labels {
-            endpoint: Endpoint::Execute,
-            outcome,
-
-            target: None,
-            channel: Some(channel),
-            mode: Some(mode),
-            edition: Some(edition),
-            crate_type: Some(crate_type),
-            tests: Some(tests),
-            backtrace: Some(backtrace),
-        }
-    }
-}
-
-impl GenerateLabels for sandbox::FormatRequest {
-    fn generate_labels(&self, outcome: Outcome) -> Labels {
-        let Self { edition, code: _ } = *self;
-
-        Labels {
-            endpoint: Endpoint::Format,
-            outcome,
-
-            target: None,
-            channel: None,
-            mode: None,
-            edition: Some(edition),
-            crate_type: None,
-            tests: None,
-            backtrace: None,
-        }
-    }
-}
-
 impl GenerateLabels for sandbox::ClippyRequest {
     fn generate_labels(&self, outcome: Outcome) -> Labels {
         let Self {
@@ -368,24 +294,6 @@ fn common_success_details(success: bool, stderr: &str) -> Outcome {
     }
 }
 
-impl SuccessDetails for sandbox::CompileResponse {
-    fn success_details(&self) -> Outcome {
-        common_success_details(self.success, &self.stderr)
-    }
-}
-
-impl SuccessDetails for sandbox::ExecuteResponse {
-    fn success_details(&self) -> Outcome {
-        common_success_details(self.success, &self.stderr)
-    }
-}
-
-impl SuccessDetails for sandbox::FormatResponse {
-    fn success_details(&self) -> Outcome {
-        common_success_details(self.success, &self.stderr)
-    }
-}
-
 impl SuccessDetails for sandbox::ClippyResponse {
     fn success_details(&self) -> Outcome {
         common_success_details(self.success, &self.stderr)
@@ -423,19 +331,6 @@ where
     Resp: SuccessDetails,
 {
     track_metric_common_async(request, body, |_| {}).await
-}
-
-pub(crate) async fn track_metric_force_endpoint_async<Req, B, Resp>(
-    request: Req,
-    endpoint: Endpoint,
-    body: B,
-) -> sandbox::Result<Resp>
-where
-    Req: GenerateLabels,
-    for<'req> B: FnOnce(&'req Req) -> BoxFuture<'req, sandbox::Result<Resp>>,
-    Resp: SuccessDetails,
-{
-    track_metric_common_async(request, body, |labels| labels.endpoint = endpoint).await
 }
 
 async fn track_metric_common_async<Req, B, Resp, F>(
@@ -545,6 +440,27 @@ impl HasLabelsCore for coordinator::ExecuteRequest {
             crate_type: Some(crate_type.into()),
             tests: Some(tests),
             backtrace: Some(backtrace),
+        }
+    }
+}
+
+impl HasLabelsCore for coordinator::FormatRequest {
+    fn labels_core(&self) -> LabelsCore {
+        let Self {
+            channel,
+            crate_type,
+            edition,
+            code: _,
+        } = *self;
+
+        LabelsCore {
+            target: None,
+            channel: Some(channel.into()),
+            mode: None,
+            edition: Some(Some(edition.into())),
+            crate_type: Some(crate_type.into()),
+            tests: None,
+            backtrace: None,
         }
     }
 }
